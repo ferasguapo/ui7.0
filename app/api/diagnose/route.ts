@@ -1,43 +1,99 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callAI, coerceToJSONObject, normalizeToSchema } from "@/lib/ai";
-    import { scrapeOreilly, scrapeYoutube } from "@/lib/scraper";
-    
+import { scrapeOreilly, scrapeYoutube } from "@/lib/scraper";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { year, make, model, part, code, notes, provider, modelName } = body;
+    const { year, make, model, part, code, notes } = body;
 
-    const prompt = [
-      "Generate a structured automotive diagnostic and repair guide as JSON.",
-      "Always return VALID JSON. No prose. Use these keys:",
-      "{",
-      "  \"overview\": string,",
-      "  \"diagnostic_steps\": string[],",
-      "  \"repair_steps\": string[],",
-      "  \"tools_needed\": string[],",
-      "  \"time_estimate\": string,",
-      "  \"cost_estimate\": string,",
-      "  \"parts\": string[],",
-      "  \"videos\": string[]",
-      "}",
-      "Write as if explaining to someone with NO prior car repair experience. Be very clear and step-by-step.",",
-      "",
-      "Vehicle: " + [year, make, model].filter(Boolean).join(" "),
-      part ? `Part: ${part}` : "",
-      code ? `OBD-II Code: ${code}` : "",
-      notes ? `Notes: ${notes}` : ""
-    ].filter(Boolean).join("\n");
+    const vehicleInfo = [year, make, model].filter(Boolean).join(" ");
 
-    const aiText = await callAI(prompt, provider ?? (process.env.DEFAULT_PROVIDER as any) ?? "openai", modelName ?? process.env.DEFAULT_MODEL ?? "");
+    const prompt = `
+You are an expert automotive repair assistant.
+Explain as if teaching someone with NO prior car repair experience.
+Be extremely step-by-step, clear, and beginner friendly.
 
-    const parsed = coerceToJSONObject(aiText);
-    const normalized = normalizeToSchema(parsed);
+Format your response in sections with emoji headings like this:
 
-    return NextResponse.json({ ok: true, data: normalized, raw: aiText }, { status: 200 });
+📝 Overview
+...
+
+🔍 Diagnostic Steps
+...
+
+🛠 Repair Steps
+...
+
+🔧 Tools Needed
+...
+
+⏱ Estimated Time
+...
+
+💰 Estimated Cost
+...
+
+🔩 Parts
+...
+
+🎥 Related Videos
+...
+
+Vehicle: ${vehicleInfo || "Unknown"}
+${part ? `Part: ${part}` : ""}
+${code ? `OBD-II Code: ${code}` : ""}
+${notes ? `Notes: ${notes}` : ""}
+`;
+
+    // Call Hugging Face Inference API
+    const res = await fetch(
+      "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: { max_new_tokens: 800, temperature: 0.7 },
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    // Hugging Face returns an array like: [{ generated_text: "..." }]
+    const aiText =
+      Array.isArray(data) && data[0]?.generated_text
+        ? data[0].generated_text
+        : JSON.stringify(data);
+
+    // Scrape extra resources
+    const oreillyLinks = await scrapeOreilly(`${vehicleInfo} ${part ?? ""}`);
+    const youtubeLinks = await scrapeYoutube(`${vehicleInfo} ${part ?? ""} repair`);
+
+    // Append scraped resources to the AI response
+    const finalText = `${aiText}
+
+🔩 Related Parts (O’Reilly Auto Parts)
+${oreillyLinks.map((l) => `- ${l}`).join("\n")}
+
+🎥 Related Tutorials (YouTube)
+${youtubeLinks.map((l) => `- ${l}`).join("\n")}
+`;
+
+    return NextResponse.json(
+      { ok: true, data: finalText },
+      { status: 200 }
+    );
   } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message ?? "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? "Unknown error" },
+      { status: 500 }
+    );
   }
 }
+
