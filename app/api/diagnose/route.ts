@@ -30,17 +30,33 @@ export async function POST(req: NextRequest) {
       notes ? `Notes: ${notes}` : ""
     ].filter(Boolean).join("\n");
 
+    // Call AI
     const aiText = await callAI(
       prompt,
       provider ?? (process.env.DEFAULT_PROVIDER as any) ?? "openai",
       modelName ?? process.env.DEFAULT_MODEL ?? ""
     );
 
+    // Parse + normalize JSON
     const parsed = coerceToJSONObject(aiText);
     const normalized = normalizeToSchema(parsed);
 
-    return NextResponse.json({ ok: true, data: normalized, raw: aiText }, { status: 200 });
+    // 🔧 Scrape O'Reilly + YouTube
+    const oreillyLinks = part ? await scrapeOreilly(`${year} ${make} ${model} ${part}`) : [];
+    const youtubeLinks = part ? await scrapeYoutube(`${year} ${make} ${model} ${part} repair tutorial`) : [];
+
+    // Merge scraped data into response
+    const finalData = {
+      ...normalized,
+      parts: [...(normalized.parts ?? []), ...oreillyLinks],
+      videos: [...(normalized.videos ?? []), ...youtubeLinks],
+    };
+
+    return NextResponse.json({ ok: true, data: finalData, raw: aiText }, { status: 200 });
   } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message ?? "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? "Unknown error" },
+      { status: 500 }
+    );
   }
 }
